@@ -20,6 +20,8 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from megatron.training import print_rank_0
+
 
 @dataclass
 class MLPSubmodules:
@@ -142,6 +144,20 @@ class MLP(MegatronModule):
                         sub_sd[k] = apply_swiglu_sharded_factory(v, sharded_offsets)
             sharded_state_dict.update(sub_sd)
         return sharded_state_dict
+
+
+class FusedMLP(MLP):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules: MLPSubmodules,
+    ):
+        super().__init__(config, submodules, False, None)
+        print_rank_0('Building with Fused MLP...')
+
+    def forward(self, hidden_states):
+        print('Forwarding with FusedMLP')
+        super().forward(hidden_states)
 
 
 def apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets):
