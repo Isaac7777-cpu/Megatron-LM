@@ -211,6 +211,7 @@ def _get_mlp_module_spec(
     """Helper function to get module spec for MLP/MoE"""
     if num_experts is None:
         # Dense MLP w/ or w/o TE modules.
+        # This is the current way of constructing GPT2
         return ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(
