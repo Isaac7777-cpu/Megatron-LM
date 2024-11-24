@@ -96,6 +96,9 @@ class MLP(MegatronModule):
         # [s, b, 4 * h/p]
         intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
 
+        # I think the default usage of GPT is actually using bias activation fusion.
+        # Also, the default spec (which is the one we are using) is using gelu. Check if the goal is to use `silu`?
+        # Furthermore, the default spec is not using a gated_linear_unit as well.
         if self.config.bias_activation_fusion:
             if self.activation_func == F.gelu:
                 if self.config.gated_linear_unit:
@@ -142,6 +145,20 @@ class MLP(MegatronModule):
                         sub_sd[k] = apply_swiglu_sharded_factory(v, sharded_offsets)
             sharded_state_dict.update(sub_sd)
         return sharded_state_dict
+
+
+class FusedMLP(MLP):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules: MLPSubmodules,
+    ):
+        super().__init__(config, submodules, False, None)
+        print('Building with Fused MLP...')
+
+    def forward(self, hidden_states):
+        print('Forwarding with FusedMLP')
+        super().forward(hidden_states)
 
 
 def apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets):

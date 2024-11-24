@@ -52,4 +52,21 @@ class GeLUFunction(torch.autograd.Function):
         return super().apply(*args, **kwargs)
 
 
+class RevisedGELUFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, bias):
+        ctx.save_for_backward(input, bias)  #TODO: Use a different forward passing function
+        return bias_gelu(bias, input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, bias = ctx.saved_tensors
+        tmp = bias_gelu_back(grad_output, bias, input)
+        return tmp, tmp
+
+    @classmethod
+    def apply(cls, *args, **kwargs):
+        return super().apply(*args, **kwargs)
+
+
 bias_gelu_impl = GeLUFunction.apply
