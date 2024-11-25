@@ -147,20 +147,6 @@ class MLP(MegatronModule):
         return sharded_state_dict
 
 
-class FusedMLP(MLP):
-    def __init__(
-        self,
-        config: TransformerConfig,
-        submodules: MLPSubmodules,
-    ):
-        super().__init__(config, submodules, False, None)
-        print('Building with Fused MLP...')
-
-    def forward(self, hidden_states):
-        print('Forwarding with FusedMLP')
-        super().forward(hidden_states)
-
-
 def apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets):
     # We must split the tensor into 2 parts, each sharded separately.
     # This requires a ShardedTensorFactory which `chunk`s during saving
