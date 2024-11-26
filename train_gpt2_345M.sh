@@ -53,6 +53,7 @@ TRAINING_ARGS=(
     
     # ZPL: We don't have transformer engine
     --transformer-impl local
+    --ffn-impl ffn_fused
 
     # ZPL: We don't have apex
     --no-persist-layer-norm 

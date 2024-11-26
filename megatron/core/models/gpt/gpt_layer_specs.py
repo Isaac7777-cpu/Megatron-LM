@@ -9,6 +9,7 @@ from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
+from megatron.core.transformer.ffn import  FusedFFN
 from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.multi_latent_attention import (
@@ -50,6 +51,7 @@ except ImportError:
     LNImpl = WrappedTorchNorm
 
 
+# noinspection PyTypeChecker
 def get_gpt_layer_with_transformer_engine_spec(
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
@@ -127,12 +129,13 @@ def get_gpt_layer_with_transformer_engine_spec(
             ),
         )
 
-
+#noinspection PyTypeChecker
 def get_gpt_layer_local_spec(
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     qk_layernorm: Optional[bool] = False,
     multi_latent_attention: Optional[bool] = False,
+    use_ffn_fused: Optional[bool] = False
 ) -> ModuleSpec:
     """Use this spec for an implementation using only modules in Megatron-Core.
 
@@ -146,7 +149,7 @@ def get_gpt_layer_local_spec(
         ModuleSpec: Module specification with Megatron-Core modules
     """
     mlp = _get_mlp_module_spec(
-        use_te=False, num_experts=num_experts, moe_grouped_gemm=moe_grouped_gemm
+        use_te=False, num_experts=num_experts, moe_grouped_gemm=moe_grouped_gemm, use_ffn_fused=use_ffn_fused
     )
     if multi_latent_attention:
         return ModuleSpec(
@@ -202,12 +205,23 @@ def get_gpt_layer_local_spec(
         )
 
 
+#noinspection PyTypeChecker
 def _get_mlp_module_spec(
     use_te: Optional[bool] = True,
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     fp8: Optional[str] = None,
+    use_ffn_fused: Optional[bool] = False
 ) -> ModuleSpec:
+    if use_ffn_fused:
+        return ModuleSpec(
+            module=FusedFFN,
+            submodules=MLPSubmodules(
+                linear_fc1=ColumnParallelLinear,    #IL: Always use the basic one without transformer engine as it is not working for the moment
+                linear_fc2=RowParallelLinear,       #IL: Always use the basic one without transformer engine as it is not working for the moment
+            ),
+        )
+
     """Helper function to get module spec for MLP/MoE"""
     if num_experts is None:
         # Dense MLP w/ or w/o TE modules.

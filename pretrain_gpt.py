@@ -52,6 +52,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
     """
     args = get_args()
     use_te = args.transformer_impl == "transformer_engine"
+    use_ffn_fused = args.ffn_impl == "ffn_fused"
 
     if args.record_memory_history:
         torch.cuda.memory._record_memory_history(True,
@@ -83,7 +84,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             if use_te:
                 transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(args.num_experts, args.moe_grouped_gemm, args.qk_layernorm, args.multi_latent_attention, args.fp8)
             else:
-                transformer_layer_spec = get_gpt_layer_local_spec(args.num_experts, args.moe_grouped_gemm, args.qk_layernorm, args.multi_latent_attention)
+                transformer_layer_spec = get_gpt_layer_local_spec(args.num_experts, args.moe_grouped_gemm, args.qk_layernorm, args.multi_latent_attention, use_ffn_fused)
 
         build_model_context = nullcontext
         build_model_context_args = {}

@@ -348,6 +348,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         # MLP.
+        print(type(self.mlp))
         mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself

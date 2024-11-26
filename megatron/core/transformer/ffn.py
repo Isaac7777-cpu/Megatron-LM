@@ -49,7 +49,7 @@ class FusedFFN(MLP):
     ):
         super().__init__(config, submodules, is_expert=is_expert, input_size=input_size)
         print('[IL_DEBUG]Using custom FFN')
-    
+
     def forward(self, hidden_states):
         return FFNFusedSimple.apply(hidden_states)
 
@@ -196,3 +196,17 @@ class FFNFused(torch.autograd.Function):
         ctx.grad_output_buffer = linear_fc1.grad_output_buffer
 
         return output, output_bias
+
+    @staticmethod
+    def backward(ctx: Any, *grad_outputs: Any) -> Any: pass
+
+
+class FFNFusedSimple(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, _input) -> Any:
+        print('input: ', _input)
+        raise NotImplementedError("Debugging")
+
+    @staticmethod
+    def backward(ctx: Any, *grad_outputs: Any) -> Any:
+        raise NotImplementedError("Still debugging...")
