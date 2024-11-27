@@ -55,7 +55,6 @@ class FusedFFN(MLP):
         self.beta = torch.nn.Parameter(torch.zeros(config.hidden_size))
 
     def forward(self, hidden_states):
-        return FFNFusedSimple.apply(hidden_states)
         return FFNFusedSimple.apply(hidden_states, self.config, self.linear_fc1, self.linear_fc2, self.gamma, self.beta)
 
 
@@ -166,6 +165,123 @@ class FFNFusedSimple(torch.autograd.Function):
 
         # Restore original shape and return both output and bias
         return output.view(shape), final_bias
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        """
+        Backward pass for fused FFN with normalization, scaling, and bias.
+
+        Args:
+            ctx: Context containing saved tensors from the forward pass.
+            grad_outputs: Tuple of gradients of the loss with respect to each output of the forward pass.
+
+        Returns:
+            Tuple: Gradients for all inputs to the forward function.
+        """
+
+        assert len(
+            grad_outputs) == 2, "The Forward of this Function returns two things, so we should get two things back."
+
+        # Load save tensors
+        (
+            norm_gamma, norm_beta,
+            _input, normalized_input,
+            mean, var_or_rms,
+            linear_fc1_weight, linear_fc1_bias,
+            intermediate, activated,
+            linear_fc2_weight, linear_fc2_bias
+        ) = ctx.saved_tensor
+
+        # Load Context
+        gated = ctx.gated
+        shape = ctx.shape
+        layernorm_eps = ctx.layernorm_eps
+        normalization = ctx.normalization
+        act_fn = ctx.act_fn
+
+        # Extract gradient of the loss with respect to each forward output
+        grad_output = grad_outputs[0]  # Gradient w.r.t. the main output
+        grad_output_bias = grad_outputs[1] if len(grad_outputs) > 1 else None
+
+        # Reshape grad_output for the correct shape for matrix multiplication / linear transformation
+        grad_output = grad_output.contiguous().view(-1, grad_output.size(-1))
+
+        # Gradients for linear_fc2 (down-projection)
+        grad_linear_fc2_weight = torch.matmul(grad_output.t(), activated.to(grad_output.dtype))
+        grad_activated = grad_output @ linear_fc2_weight
+        grad_linear_fc2_bias = grad_output.sum(dim=0) if linear_fc2_bias is not None else None
+
+        # Backward through activation function
+        if gated:
+            # GLU backward
+            # Split the intermediate into two for GLU
+            x1, x2 = torch.chunk(intermediate, 2, dim=-1)
+
+            # Compute value for activated part
+            activated_x1 = act_fn(x1)
+
+            # Gradients for GLU components
+            grad_x1 = grad_activated * x2 * torch.autograd.grad(
+                outputs=activated_x1,
+                inputs=x1,
+                grad_ouputs=grad_activated * x2,
+                retain_graph=True
+            )[0]  # Gradient w.r.t. x1 (actviated part)
+
+            grad_x2 = grad_activated * activated_x1
+
+            grad_intermediate = torch.cat([grad_x1, grad_x2], dim=-1)
+        else:
+            grad_intermediate = grad_activated * torch.autograd.grad(
+                outputs=act_fn(intermediate),
+                inputs=intermediate,
+                grad_outputs=grad_activated,
+                retain_graph=True,
+            )[0]
+
+        # Gradients for linear_fc1 (up-projection)
+        grad_linear_fc1_weight = torch.matmul(grad_intermediate.t(), normalized_input.to(grad_intermediate.dtype))
+        grad_normalized_input = torch.matmul(grad_intermediate, linear_fc1_weight.to(grad_intermediate.dtype))
+        grad_linear_fc1_bias = grad_intermediate.sum(dim=0) if linear_fc1_bias is not None else None
+
+        grad_norm_gamma = (grad_normalized_input * normalized_input).sum(dim=0) if norm_gamma is not None else None
+        grad_norm_beta = grad_normalized_input.sum(dim=0) if norm_beta is not None else None
+
+        # Backward through normalization
+        if normalization == 'LayerNorm':
+            grad_input_normalized = (grad_normalized_input * norm_gamma[None, :]) \
+                                        if norm_gamma is not None else grad_normalized_input
+            grad_input = (
+                grad_input_normalized
+                - mean - normalized_input * (grad_input_normalized * normalized_input).mean(dim=-1, keepdim=True)
+            ) / (var_or_rms + layernorm_eps).sqrt()
+
+        elif normalization == 'RMSNorm':
+            grad_input_normalized = grad_normalized_input * norm_gamma[None, :] \
+                                        if norm_gamma is not None else grad_normalized_input
+            grad_input = grad_input_normalized / var_or_rms - normalized_input * (
+                    (grad_input_normalized * normalized_input).sum(dim=-1, keepdim=True) / var_or_rms
+            )
+        else:
+            raise NotImplementedError('Other Type of Norm (Except Layer and RMS) is Not Supported')
+
+        # Reshape grad_input back to original shape
+        grad_input = grad_input.view(shape)
+
+        raise NotImplementedError("Still debugging...")
+
+        # Return gradients for all inputs to forward
+        # Make sure the order matches the inputs to forward
+        return (
+            grad_input,  # Gradient w.r.t. _input
+            None,  # Gradient w.r.t. config (not trainable)
+            grad_linear_fc1_weight,  # Gradient w.r.t. linear_fc1.weight
+            grad_linear_fc1_bias,  # Gradient w.r.t. linear_fc1.bias
+            grad_linear_fc2_weight,  # Gradient w.r.t. linear_fc2.weight
+            grad_linear_fc2_bias,  # Gradient w.r.t. linear_fc2.bias
+            grad_norm_gamma,  # Gradient w.r.t. norm_gamma
+            grad_norm_beta,  # Gradient w.r.t. norm_beta
+        )
 
 
 class FFNFused(torch.autograd.Function):
