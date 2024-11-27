@@ -232,7 +232,8 @@ class FFNFused(torch.autograd.Function):
         ):
             input_parallel = norm_input
         else:
-            input_parallel = copy_to_tensor_model_parallel_region(norm_input)  # I believe this function does not involve saving anything to the context
+            input_parallel = copy_to_tensor_model_parallel_region(
+                norm_input)  # I believe this function does not involve saving anything to the context
 
         if linear_fc1.config.defer_embedding_wgrad_compute:
             if (
@@ -313,15 +314,5 @@ class FFNFused(torch.autograd.Function):
         return output, output_bias
 
     @staticmethod
-    def backward(ctx: Any, *grad_outputs: Any) -> Any: pass
-
-
-class FFNFusedSimple(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, _input) -> Any:
-        print('input: ', _input)
-        raise NotImplementedError("Debugging")
-
-    @staticmethod
     def backward(ctx: Any, *grad_outputs: Any) -> Any:
-        raise NotImplementedError("Still debugging...")
+        pass

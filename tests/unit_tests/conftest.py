@@ -15,9 +15,16 @@ from tests.unit_tests.test_utilities import Utils
 
 @pytest.fixture(scope="function", autouse=True)
 def set_env():
-    if is_te_min_version("1.3"):
-        os.environ['NVTE_FLASH_ATTN'] = '0'
-        os.environ['NVTE_FUSED_ATTN'] = '0'
+    try:
+        import transformer_engine
+        HAVE_TE = True
+    except ImportError:
+        HAVE_TE = False
+
+    if HAVE_TE:
+        if is_te_min_version("1.3"):
+            os.environ['NVTE_FLASH_ATTN'] = '0'
+            os.environ['NVTE_FUSED_ATTN'] = '0'
 
 
 @pytest.fixture(scope="session")
