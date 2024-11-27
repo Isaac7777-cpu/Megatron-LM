@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -31,7 +31,6 @@ else:
     custom_fwd = torch.cuda.amp.custom_fwd
     custom_bwd = torch.cuda.amp.custom_bwd
 
-
 if is_torch_min_version("1.13.0"):
     dist_all_gather_func = torch.distributed.all_gather_into_tensor
     dist_reduce_scatter_func = torch.distributed.reduce_scatter_tensor
@@ -39,24 +38,140 @@ else:
     dist_all_gather_func = torch.distributed._all_gather_base
     dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
+
 class FusedFFN(MLP):
     def __init__(
-        self,
-        config: TransformerConfig,
-        submodules: MLPSubmodules,
-        is_expert: bool = False,
-        input_size: int = None,
+            self,
+            config: TransformerConfig,
+            submodules: MLPSubmodules,
+            is_expert: bool = False,
+            input_size: int = None,
     ):
         super().__init__(config, submodules, is_expert=is_expert, input_size=input_size)
-        print('[IL_DEBUG]Using custom FFN')
+        print('\n[IL_DEBUG]Using custom FFN')
+
+        # Add gamma (scaling) and beta (bias) as learnable parameters
+        self.gamma = torch.nn.Parameter(torch.ones(config.hidden_size))
+        self.beta = torch.nn.Parameter(torch.zeros(config.hidden_size))
 
     def forward(self, hidden_states):
         return FFNFusedSimple.apply(hidden_states)
+        return FFNFusedSimple.apply(hidden_states, self.config, self.linear_fc1, self.linear_fc2, self.gamma, self.beta)
+
+
+class FFNFusedSimple(torch.autograd.Function):
+    @staticmethod
+    def forward(
+            ctx,
+            _input: torch.Tensor,
+            config: TransformerConfig,
+            linear_fc1: ColumnParallelLinear,
+            linear_fc2: RowParallelLinear,
+            norm_gamma: Optional[torch.Tensor] = None,
+            norm_beta: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass for fused FFN with normalization, scaling, and bias.
+
+        Args:
+            ctx: Context for saving tensors for backward pass.
+            _input (Tensor): Input tensor to normalize. Shape: (batch_size, seq_len, hidden_size).
+            config (TransformerConfig): Configuration object for the transformer.
+            linear_fc1 (ColumnParallelLinear): Up-projection linear layer.
+            linear_fc2 (RowParallelLinear): Down-projection linear layer.
+            norm_gamma (Tensor, optional): Scaling parameter for normalization. Shape: (hidden_size,).
+            norm_beta (Tensor, optional): Bias parameter for normalization. Shape: (hidden_size,).
+
+        Returns:
+            Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                - The final output tensor with the same shape as `_input`.
+                - The bias tensor from `linear_fc2` or `None`.
+        """
+        # Ensure correct types for linear layers
+        assert isinstance(linear_fc1, ColumnParallelLinear), \
+            "linear_fc1 must be an instance of ColumnParallelLinear"
+        assert isinstance(linear_fc2, RowParallelLinear), \
+            "linear_fc2 must be an instance of RowParallelLinear"
+
+        # Save original shape for restoring later
+        shape = _input.shape
+        _input = _input.contiguous().view(-1, _input.size(-1))  # Flatten leading dimensions
+
+        # Debugging info
+        if getattr(config, "debug", False):
+            print("Input shape:", shape)
+            print("Flattened input shape:", _input.shape)
+
+        # Normalization
+        if config.normalization == "LayerNorm":
+            mean = _input.mean(dim=-1, keepdim=True)
+            var = _input.var(dim=-1, unbiased=False, keepdim=True)
+            normalized_input = (_input - mean) / ((var + config.layernorm_epsilon) ** 0.5)
+
+        elif config.normalization == "RMSNorm":
+            rms = ((_input ** 2).mean(dim=-1, keepdim=True) + config.layernorm_epsilon) ** 0.5
+            normalized_input = _input / rms
+
+        else:
+            raise NotImplementedError("Only LayerNorm and RMSNorm are supported.")
+
+        # Apply scaling (gamma) and bias (beta) if provided
+        if norm_gamma is not None:
+            assert norm_gamma.dim() == 1 and norm_gamma.size(0) == _input.size(-1), \
+                "norm_gamma must be a 1D tensor with size matching the hidden dimension"
+            normalized_input = normalized_input * norm_gamma[None, :]
+            if norm_beta is not None:
+                assert norm_beta.dim() == 1 and norm_beta.size(0) == _input.size(-1), \
+                    "norm_beta must be a 1D tensor with size matching the hidden dimension"
+                normalized_input = normalized_input + norm_beta[None, :]
+
+        # First linear layer (up-projection)
+        intermediate = torch.nn.functional.linear(
+            normalized_input, linear_fc1.weight, linear_fc1.bias
+        )
+
+        # Apply activation and optional gating
+        if config.gated_linear_unit:
+            def glu(x):
+                chunks = torch.chunk(x, 2, dim=-1)
+                return config.activation_func(chunks[0]) * chunks[1]
+
+            activated = glu(intermediate)
+        else:
+            activated = config.activation_func(intermediate)
+
+        # Second linear layer (down-projection)
+        output = torch.nn.functional.linear(activated, linear_fc2.weight, linear_fc2.bias)
+
+        # Retrieve the bias from the final layer
+        final_bias = linear_fc2.bias
+
+        # Save tensors for backward pass
+        ctx.save_for_backward(
+            norm_gamma, norm_beta,
+            _input, normalized_input,
+            mean if config.normalization == "LayerNorm" else None,
+            var if config.normalization == "LayerNorm" else rms,
+            linear_fc1.weight, linear_fc1.bias,
+            intermediate, activated,
+            linear_fc2.weight, linear_fc2.bias,
+        )
+
+        # Save additional context
+        ctx.gated = config.gated_linear_unit
+        ctx.shape = shape
+        ctx.layernorm_eps = config.layernorm_epsilon
+        ctx.normalization = config.normalization
+        ctx.act_fn = config.activation_func
+
+        # Restore original shape and return both output and bias
+        return output.view(shape), final_bias
 
 
 class FFNFused(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, linear_fc1 : ColumnParallelLinear, linear_fc2 : RowParallelLinear, _input, config : TransformerConfig) -> Any:
+    def forward(ctx, linear_fc1: ColumnParallelLinear, linear_fc2: RowParallelLinear, _input,
+                config: TransformerConfig) -> Any:
         raise NotImplemented('This Complex Version is Not Implemented Yet...',
                              'Please use the simple version FFNApplySimple',
                              'The only difference is the simple one only support a specific configs...')
@@ -74,7 +189,7 @@ class FFNFused(torch.autograd.Function):
             norm_cls = torch.nn.LayerNorm
         elif config.normalization == "RMSNorm":
             version_geq_2_4 = int(TORCH_VERSION[0]) > 2 or (
-                int(TORCH_VERSION[0]) == 2 and int(TORCH_VERSION[1]) >= 4
+                    int(TORCH_VERSION[0]) == 2 and int(TORCH_VERSION[1]) >= 4
             )
             assert version_geq_2_4, 'Torch RMSNorm requires PyTorch version >= 2.4.0'
 
